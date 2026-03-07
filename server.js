@@ -159,10 +159,69 @@ io.on('connection', (socket) => {
   // ===== REJOINDRE UNE PARTIE =====
   socket.on('join-session', async ({ roomCode, userId, userName }) => {
     try {
-      const session = activeSessions.get(roomCode);
+      let session = activeSessions.get(roomCode);
       
+      // Si la session n'est pas en mémoire, la charger depuis la BDD
       if (!session) {
-        return socket.emit('error', { message: 'Session not found' });
+        console.log(`🔍 Session ${roomCode} pas en mémoire, chargement depuis BDD...`);
+        
+        if (!dbPool) {
+          return socket.emit('error', { message: 'Database not available' });
+        }
+        
+        // Récupérer la session depuis la BDD
+        const [rows] = await dbPool.execute(
+          `SELECT id, room_code, creator_id, gm_user_id, state_data, created_at 
+           FROM game_sessions 
+           WHERE room_code = ? AND status = 'active'`,
+          [roomCode]
+        );
+        
+        if (rows.length === 0) {
+          return socket.emit('error', { message: 'Session not found' });
+        }
+        
+        const dbSession = rows[0];
+        
+        // Récupérer les participants
+        const [participants] = await dbPool.execute(
+          `SELECT gp.user_id, u.display_name as user_name, gp.role 
+           FROM game_participants gp
+           JOIN users u ON gp.user_id = u.id
+           WHERE gp.session_id = ? AND gp.left_at IS NULL`,
+          [dbSession.id]
+        );
+        
+        // Charger l'état depuis la BDD ou créer un état vide
+        let state = dbSession.state_data ? JSON.parse(dbSession.state_data) : {
+          scene: null,
+          music: null,
+          diceHistory: [],
+          chatHistory: [],
+          tokens: [],
+          turnOrder: [],
+          currentTurn: 0
+        };
+        
+        // Créer la session en mémoire
+        session = {
+          roomCode: dbSession.room_code,
+          creatorId: dbSession.creator_id,
+          gmUserId: dbSession.gm_user_id,
+          participants: participants.map(p => ({
+            userId: p.user_id,
+            userName: p.user_name,
+            socketId: null, // Sera mis à jour ci-dessous
+            isGM: p.role === 'gm',
+            joinedAt: Date.now()
+          })),
+          state,
+          createdAt: new Date(dbSession.created_at).getTime(),
+          lastActivity: Date.now()
+        };
+        
+        activeSessions.set(roomCode, session);
+        console.log(`✅ Session ${roomCode} chargée depuis BDD`);
       }
       
       // Vérifier si l'utilisateur est déjà dans la session
@@ -171,6 +230,7 @@ io.on('connection', (socket) => {
       if (existingParticipant) {
         // Mettre à jour le socketId (reconnexion)
         existingParticipant.socketId = socket.id;
+        console.log(`🔄 ${userName} s'est reconnecté à ${roomCode}`);
       } else {
         // Ajouter nouveau participant
         session.participants.push({
@@ -180,6 +240,7 @@ io.on('connection', (socket) => {
           isGM: false,
           joinedAt: Date.now()
         });
+        console.log(`➕ ${userName} ajouté à ${roomCode}`);
       }
       
       // Rejoindre la room
@@ -208,7 +269,7 @@ io.on('connection', (socket) => {
       
     } catch (error) {
       console.error('Erreur rejoindre session:', error);
-      socket.emit('error', { message: 'Failed to join session' });
+      socket.emit('error', { message: 'Failed to join session: ' + error.message });
     }
   });
   
