@@ -157,7 +157,7 @@ io.on('connection', (socket) => {
   });
   
   // ===== REJOINDRE UNE PARTIE =====
-  socket.on('join-session', async ({ roomCode, userId, userName, characterId }) => {
+  socket.on('join-session', async ({ roomCode, userId, userName, characterId, isGM }) => {
     try {
       let session = activeSessions.get(roomCode);
       
@@ -229,7 +229,7 @@ io.on('connection', (socket) => {
       const existingParticipant = session.participants.find(p => p.userId === userId);
       
       if (existingParticipant) {
-        // Mettre à jour le socketId (reconnexion)
+        // RECONNEXION : Mettre à jour uniquement le socketId
         existingParticipant.socketId = socket.id;
         // Mettre à jour le characterId si fourni
         if (characterId) {
@@ -237,16 +237,19 @@ io.on('connection', (socket) => {
         }
         console.log(`🔄 ${userName} s'est reconnecté à ${roomCode}`);
       } else {
-        // Ajouter nouveau participant
+        // Déterminer si c'est le MJ (via flag OU si c'est le gm_user_id)
+        const isUserGM = isGM || userId === session.gmUserId;
+        
         session.participants.push({
           userId,
           userName,
           socketId: socket.id,
-          isGM: false,
+          isGM: isUserGM,
           characterId: characterId || null,
           joinedAt: Date.now()
         });
-        console.log(`➕ ${userName} ajouté à ${roomCode}`);
+        
+        console.log(`➕ ${userName} ajouté à ${roomCode} ${isUserGM ? '(MJ)' : '(Joueur)'}`);
       }
       
       // Rejoindre la room
