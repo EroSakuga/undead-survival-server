@@ -157,7 +157,7 @@ io.on('connection', (socket) => {
   });
   
   // ===== REJOINDRE UNE PARTIE =====
-  socket.on('join-session', async ({ roomCode, userId, userName }) => {
+  socket.on('join-session', async ({ roomCode, userId, userName, characterId }) => {
     try {
       let session = activeSessions.get(roomCode);
       
@@ -185,7 +185,7 @@ io.on('connection', (socket) => {
         
         // Récupérer les participants
         const [participants] = await dbPool.execute(
-          `SELECT gp.user_id, u.display_name as user_name, gp.role 
+          `SELECT gp.user_id, u.display_name as user_name, gp.role, gp.character_id
            FROM game_participants gp
            JOIN users u ON gp.user_id = u.id
            WHERE gp.session_id = ? AND gp.left_at IS NULL`,
@@ -213,6 +213,7 @@ io.on('connection', (socket) => {
             userName: p.user_name,
             socketId: null, // Sera mis à jour ci-dessous
             isGM: p.role === 'gm',
+            characterId: p.character_id,
             joinedAt: Date.now()
           })),
           state,
@@ -230,6 +231,10 @@ io.on('connection', (socket) => {
       if (existingParticipant) {
         // Mettre à jour le socketId (reconnexion)
         existingParticipant.socketId = socket.id;
+        // Mettre à jour le characterId si fourni
+        if (characterId) {
+          existingParticipant.characterId = characterId;
+        }
         console.log(`🔄 ${userName} s'est reconnecté à ${roomCode}`);
       } else {
         // Ajouter nouveau participant
@@ -238,6 +243,7 @@ io.on('connection', (socket) => {
           userName,
           socketId: socket.id,
           isGM: false,
+          characterId: characterId || null,
           joinedAt: Date.now()
         });
         console.log(`➕ ${userName} ajouté à ${roomCode}`);
