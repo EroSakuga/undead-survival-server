@@ -213,6 +213,7 @@ io.on('connection', (socket) => {
         // Créer la session en mémoire
         session = {
           roomCode: dbSession.room_code,
+          sessionName: dbSession.session_name,
           creatorId: dbSession.creator_id,
           gmUserId: dbSession.gm_user_id,
           participants: participants.map(p => ({
