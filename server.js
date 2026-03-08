@@ -185,12 +185,19 @@ io.on('connection', (socket) => {
         
         // Récupérer les participants
         const [participants] = await dbPool.execute(
-          `SELECT gp.user_id, u.display_name as user_name, gp.role, gp.character_id
-           FROM game_participants gp
-           JOIN users u ON gp.user_id = u.id
-           WHERE gp.session_id = ? AND gp.left_at IS NULL`,
-          [dbSession.id]
-        );
+		  `SELECT 
+			gp.user_id, 
+			u.display_name as user_name, 
+			u.avatar_url,
+			gp.role, 
+			gp.character_id,
+			c.avatar_url as character_avatar_url
+		   FROM game_participants gp
+		   JOIN users u ON gp.user_id = u.id
+		   LEFT JOIN characters c ON gp.character_id = c.id
+		   WHERE gp.session_id = ? AND gp.left_at IS NULL`,
+		  [dbSession.id]
+		);
         
         // Charger l'état depuis la BDD ou créer un état vide
         let state = dbSession.state_data ? JSON.parse(dbSession.state_data) : {
