@@ -217,12 +217,14 @@ io.on('connection', (socket) => {
           creatorId: dbSession.creator_id,
           gmUserId: dbSession.gm_user_id,
           participants: participants.map(p => ({
-            userId: p.user_id,
-            userName: p.user_name,
-            socketId: null, // Sera mis à jour ci-dessous
-            isGM: p.role === 'gm',
-            characterId: p.character_id,
-            joinedAt: Date.now()
+            userId:               p.user_id,
+            userName:             p.user_name,
+            socketId:             null,
+            isGM:                 p.role === 'gm',
+            characterId:          p.character_id          || null,
+            character_avatar_url: p.character_avatar_url  || null,
+            avatar_url:           p.avatar_url            || null,
+            joinedAt:             Date.now()
           })),
           state,
           createdAt: new Date(dbSession.created_at).getTime(),
@@ -271,10 +273,15 @@ io.on('connection', (socket) => {
       });
       
       // Notifier les autres participants
+      const joinedParticipant = session.participants.find(p => p.userId === userId);
       socket.to(roomCode).emit('participant-joined', {
         userId,
         userName,
-        timestamp: Date.now()
+        isGM:                 joinedParticipant?.isGM                 || false,
+        characterId:          joinedParticipant?.characterId          || null,
+        character_avatar_url: joinedParticipant?.character_avatar_url || null,
+        avatar_url:           joinedParticipant?.avatar_url           || null,
+        timestamp:            Date.now()
       });
       
       // Mettre à jour la BDD
@@ -462,15 +469,19 @@ function generateRoomCode() {
 // Nettoyer les données sensibles avant envoi
 function sanitizeSession(session, userId) {
   return {
-    roomCode: session.roomCode,
+    roomCode:    session.roomCode,
+    sessionName: session.sessionName || null,
     participants: session.participants.map(p => ({
-      userId: p.userId,
-      userName: p.userName,
-      isGM: p.isGM,
-      joinedAt: p.joinedAt
+      userId:               p.userId,
+      userName:             p.userName,
+      isGM:                 p.isGM,
+      characterId:          p.characterId          || null,
+      character_avatar_url: p.character_avatar_url || null,
+      avatar_url:           p.avatar_url           || null,
+      joinedAt:             p.joinedAt
     })),
-    state: session.state,
-    isGM: session.participants.find(p => p.userId === userId)?.isGM || false,
+    state:     session.state,
+    isGM:      session.participants.find(p => p.userId === userId)?.isGM || false,
     createdAt: session.createdAt
   };
 }
