@@ -63,8 +63,9 @@ initDB();
 const activeSessions = new Map();
 
 // Structure d'une session
-const createSession = (roomCode, creatorId, gmUserId) => ({
+const createSession = (roomCode, creatorId, gmUserId, sessionName = null) => ({
   roomCode,
+  sessionName,
   creatorId,
   gmUserId,
   participants: [],
@@ -114,13 +115,13 @@ io.on('connection', (socket) => {
   console.log(`✅ Client connecté: ${socket.id}`);
   
   // ===== CRÉER UNE PARTIE =====
-  socket.on('create-session', async ({ userId, userName, isGM }) => {
+  socket.on('create-session', async ({ userId, userName, isGM, sessionName }) => {
     try {
       // Générer un code room unique
       const roomCode = generateRoomCode();
       
       // Créer la session en mémoire
-      const session = createSession(roomCode, userId, isGM ? userId : null);
+      const session = createSession(roomCode, userId, isGM ? userId : null, sessionName || null);
       
       // Ajouter le créateur comme participant
       session.participants.push({
@@ -171,7 +172,7 @@ io.on('connection', (socket) => {
         
         // Récupérer la session depuis la BDD
         const [rows] = await dbPool.execute(
-          `SELECT id, room_code, creator_id, gm_user_id, state_data, created_at 
+          `SELECT id, room_code, session_name, creator_id, gm_user_id, state_data, created_at 
            FROM game_sessions 
            WHERE room_code = ? AND status = 'active'`,
           [roomCode]
@@ -262,6 +263,17 @@ io.on('connection', (socket) => {
         console.log(`➕ ${userName} ajouté à ${roomCode} ${isUserGM ? '(MJ)' : '(Joueur)'}`);
       }
       
+      // Si sessionName manquant (session créée en mémoire avant ce fix), le charger depuis BDD
+      if (!session.sessionName && dbPool) {
+        try {
+          const [nameRows] = await dbPool.execute(
+            'SELECT session_name FROM game_sessions WHERE room_code = ? LIMIT 1',
+            [roomCode]
+          );
+          if (nameRows.length > 0) session.sessionName = nameRows[0].session_name || null;
+        } catch (e) { /* non bloquant */ }
+      }
+
       // Rejoindre la room
       socket.join(roomCode);
       socket.currentRoom = roomCode;
@@ -495,9 +507,9 @@ async function saveSessionToDB(session) {
   
   try {
     await dbPool.execute(
-      `INSERT INTO game_sessions (room_code, creator_id, gm_user_id, created_at, last_activity, status)
-       VALUES (?, ?, ?, NOW(), NOW(), 'active')`,
-      [session.roomCode, session.creatorId, session.gmUserId]
+      `INSERT INTO game_sessions (room_code, session_name, creator_id, gm_user_id, created_at, last_activity, status)
+       VALUES (?, ?, ?, ?, NOW(), NOW(), 'active')`,
+      [session.roomCode, session.sessionName || null, session.creatorId, session.gmUserId]
     );
     
     console.log(`💾 Session ${session.roomCode} sauvegardée en BDD`);
