@@ -507,17 +507,22 @@ io.on('connection', (socket) => {
     const target = session.participants.find(p => p.userId === targetUserId);
     if (!target) return;
 
-    const targetSocket = io.sockets.sockets.get(target.socketId);
-
     // Retirer de la session en mémoire
     session.participants = session.participants.filter(p => p.userId !== targetUserId);
     session.lastActivity = Date.now();
 
-    // Notifier + déconnecter le joueur expulsé
-    if (targetSocket) {
-      targetSocket.emit('kicked', { reason: reason || 'Vous avez été expulsé par le MJ.' });
-      targetSocket.leave(roomCode);
-      targetSocket.currentRoom = null;
+    // Notifier le joueur via son socketId personnel (chaque socket = sa propre room)
+    // Fonctionne même si on n'a pas le socket object directement
+    if (target.socketId) {
+      // Envoyer kicked à ce socket spécifiquement
+      io.to(target.socketId).emit('kicked', { reason: reason || 'Vous avez été expulsé par le MJ.' });
+      
+      // Forcer la sortie de la room
+      const targetSocket = io.sockets.sockets.get(target.socketId);
+      if (targetSocket) {
+        targetSocket.leave(roomCode);
+        targetSocket.currentRoom = null;
+      }
     }
 
     // Marquer left_at en BDD
