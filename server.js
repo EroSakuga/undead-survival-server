@@ -253,6 +253,15 @@ io.on('connection', (socket) => {
         // Déterminer si c'est le MJ (via flag OU si c'est le gm_user_id)
         const isUserGM = isGM || userId === session.gmUserId;
         
+        // Refuser l'accès spectateur : joueur sans personnage = rejeté
+        if (!isUserGM && !characterId) {
+          socket.emit('join-error', {
+            code:    'NO_CHARACTER',
+            message: 'Vous devez sélectionner un personnage pour rejoindre cette partie.',
+          });
+          return;
+        }
+
         // Récupérer les avatars depuis la BDD pour ce participant
         let character_avatar_url = null;
         let avatar_url = null;
@@ -485,7 +494,90 @@ io.on('connection', (socket) => {
       
       console.log(`👋 ${participant.userName} a quitté ${roomCode}`);
     }
+  })
+
+  // ── kick-player (GM seulement) ──────────────────────────────────────────────
+  socket.on('kick-player', async ({ roomCode, targetUserId, reason }) => {
+    const session = activeSessions.get(roomCode);
+    if (!session) return;
+
+    const requester = session.participants.find(p => p.socketId === socket.id);
+    if (!requester?.isGM) return;
+
+    const target = session.participants.find(p => p.userId === targetUserId);
+    if (!target) return;
+
+    const targetSocket = io.sockets.sockets.get(target.socketId);
+
+    // Retirer de la session en mémoire
+    session.participants = session.participants.filter(p => p.userId !== targetUserId);
+    session.lastActivity = Date.now();
+
+    // Notifier + déconnecter le joueur expulsé
+    if (targetSocket) {
+      targetSocket.emit('kicked', { reason: reason || 'Vous avez été expulsé par le MJ.' });
+      targetSocket.leave(roomCode);
+      targetSocket.currentRoom = null;
+    }
+
+    // Marquer left_at en BDD
+    if (dbPool) {
+      try {
+        await dbPool.execute(
+          `UPDATE game_participants gp
+           JOIN game_sessions gs ON gp.session_id = gs.id
+           SET gp.left_at = NOW()
+           WHERE gs.room_code = ? AND gp.user_id = ? AND gp.left_at IS NULL`,
+          [roomCode, targetUserId]
+        );
+      } catch (e) { console.error('kick DB error:', e); }
+    }
+
+    // Informer toute la room
+    io.to(roomCode).emit('participant-left', {
+      userId:    targetUserId,
+      userName:  target.userName,
+      kicked:    true,
+      timestamp: Date.now(),
+    });
+
+    console.log(`Expulsion: ${target.userName} de ${roomCode} par ${requester.userName}`);
   });
+
+  // ── change-session-status (GM seulement) ────────────────────────────────────
+  socket.on('change-session-status', async ({ roomCode, status }) => {
+    const VALID_STATUSES = ['active', 'paused', 'ended'];
+    if (!VALID_STATUSES.includes(status)) return;
+
+    const session = activeSessions.get(roomCode);
+    if (!session) return;
+
+    const requester = session.participants.find(p => p.socketId === socket.id);
+    if (!requester?.isGM) return;
+
+    session.status       = status;
+    session.lastActivity = Date.now();
+
+    // Persister en BDD
+    if (dbPool) {
+      try {
+        await dbPool.execute(
+          'UPDATE game_sessions SET status = ?, last_activity = NOW() WHERE room_code = ?',
+          [status, roomCode]
+        );
+      } catch (e) { console.error('status DB error:', e); }
+    }
+
+    // Broadcaster à toute la room
+    io.to(roomCode).emit('session-status-changed', {
+      status,
+      changedBy: requester.userName,
+      timestamp: Date.now(),
+    });
+
+    console.log(`Session ${roomCode} => ${status} par ${requester.userName}`);
+  });
+;
 });
 
 // ========================================
