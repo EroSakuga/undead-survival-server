@@ -349,31 +349,53 @@ io.on('connection', (socket) => {
   });
   
   // ===== LANCER UN DÉ =====
-  socket.on('roll-dice', ({ roomCode, userId, userName, formula, result }) => {
+  socket.on('roll-dice', ({ roomCode, userId, userName, formula, result, detail, secret }) => {
     const session = activeSessions.get(roomCode);
     if (!session) return;
     
+    // Vérifier que secret ne peut être posé que par un GM
+    const requester = session.participants.find(p => p.socketId === socket.id);
+    const isSecretValid = secret && requester?.isGM;
+
     const roll = {
-      id: Date.now(),
+      id:        Date.now(),
       userId,
       userName,
       formula,
       result,
-      timestamp: Date.now()
+      detail:    detail || [],
+      secret:    isSecretValid,
+      timestamp: Date.now(),
     };
-    
-    session.state.diceHistory.push(roll);
-    session.lastActivity = Date.now();
-    
-    // Limiter l'historique à 50 jets
-    if (session.state.diceHistory.length > 50) {
-      session.state.diceHistory.shift();
+
+    // Historique : jets secrets non sauvegardés (invisibles à la reconnexion)
+    if (!isSecretValid) {
+      session.state.diceHistory.push(roll);
+      if (session.state.diceHistory.length > 50) session.state.diceHistory.shift();
     }
-    
-    // Broadcast à tous dans la room
-    io.to(roomCode).emit('dice-rolled', roll);
-    
-    console.log(`🎲 ${userName} lance ${formula} = ${result}`);
+    session.lastActivity = Date.now();
+
+    if (isSecretValid) {
+      // Jet secret → uniquement au GM qui a lancé (socket.id)
+      // + notification "Le MJ a fait un jet secret" aux autres
+      socket.emit('dice-rolled', roll); // retour au GM avec le vrai résultat
+      socket.to(roomCode).emit('dice-rolled', {
+        id:        roll.id,
+        userId,
+        userName,
+        formula:   '???',
+        result:    '???',
+        detail:    [],
+        secret:    true,
+        timestamp: roll.timestamp,
+      });
+    } else {
+      // Jet normal → broadcast à tous
+      io.to(roomCode).emit('dice-rolled', roll);
+    }
+
+    const secretLabel = isSecretValid ? ' [SECRET]' : '';
+    console.log(`🎲 ${userName} lance ${formula} = ${result}${secretLabel}`);
   });
   
   // ===== ENVOYER UN MESSAGE CHAT =====
