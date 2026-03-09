@@ -693,6 +693,67 @@ setInterval(() => {
 }, 2 * 60 * 1000); // Toutes les 2 minutes
 
 // ========================================
+// NETTOYAGE AUTOMATIQUE DES SESSIONS
+// Appelle la procédure MySQL cleanup_old_sessions()
+// + sync mémoire ↔ BDD (supprime les sessions ended/expirées de activeSessions)
+// ========================================
+const CLEANUP_INTERVAL = 15 * 60 * 1000; // toutes les 15 minutes
+const SESSION_INACTIVE_MS = 2 * 60 * 60 * 1000; // 2h sans activité = expiré
+
+setInterval(async () => {
+  if (!dbPool) return;
+
+  try {
+    // 1. Appeler la procédure stockée MySQL
+    await dbPool.execute('CALL cleanup_old_sessions()');
+    console.log('🧹 cleanup_old_sessions() exécutée');
+
+    // 2. Synchroniser activeSessions avec la BDD
+    //    Retirer de la mémoire les sessions ended ou inactives depuis > 2h
+    const now = Date.now();
+    let removed = 0;
+
+    for (const [roomCode, session] of activeSessions.entries()) {
+      const isInactive = (now - (session.lastActivity || 0)) > SESSION_INACTIVE_MS;
+      const isEnded    = session.status === 'ended';
+
+      if (isEnded || isInactive) {
+        // Vérifier en BDD que la session est bien marquée ended/inactive
+        try {
+          const [rows] = await dbPool.execute(
+            "SELECT status FROM game_sessions WHERE room_code = ? LIMIT 1",
+            [roomCode]
+          );
+          const dbStatus = rows[0]?.status;
+
+          if (!rows.length || dbStatus === 'ended' || isInactive) {
+            // Avertir les participants encore connectés avant de purger
+            const socketsInRoom = await io.in(roomCode).fetchSockets();
+            if (socketsInRoom.length > 0) {
+              io.to(roomCode).emit('session-ended', {
+                reason: isEnded ? 'La session a été terminée par le MJ.' : 'Session expirée pour inactivité.',
+              });
+            }
+            activeSessions.delete(roomCode);
+            removed++;
+            console.log(`🗑️  Session ${roomCode} retirée de la mémoire (${isEnded ? 'ended' : 'inactive'})`);
+          }
+        } catch (e) {
+          console.error(`Erreur vérif session ${roomCode}:`, e);
+        }
+      }
+    }
+
+    if (removed > 0) {
+      console.log(`🧹 ${removed} session(s) purgée(s) de la mémoire`);
+    }
+
+  } catch (error) {
+    console.error('Erreur cleanup automatique:', error);
+  }
+}, CLEANUP_INTERVAL);
+
+// ========================================
 // DÉMARRAGE SERVEUR
 // ========================================
 
