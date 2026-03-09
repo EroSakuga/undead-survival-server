@@ -192,7 +192,8 @@ io.on('connection', (socket) => {
 			u.avatar_url,
 			gp.role, 
 			gp.character_id,
-			c.avatar_url as character_avatar_url
+			c.avatar_url as character_avatar_url,
+			CONCAT(c.prenom, ' ', c.nom) as character_name
 		   FROM game_participants gp
 		   JOIN users u ON gp.user_id = u.id
 		   LEFT JOIN characters c ON gp.character_id = c.id
@@ -223,6 +224,7 @@ io.on('connection', (socket) => {
             socketId:             null,
             isGM:                 p.role === 'gm',
             characterId:          p.character_id          || null,
+            characterName:        p.character_name        || null,
             character_avatar_url: p.character_avatar_url  || null,
             avatar_url:           p.avatar_url            || null,
             joinedAt:             Date.now()
@@ -251,12 +253,39 @@ io.on('connection', (socket) => {
         // Déterminer si c'est le MJ (via flag OU si c'est le gm_user_id)
         const isUserGM = isGM || userId === session.gmUserId;
         
+        // Récupérer les avatars depuis la BDD pour ce participant
+        let character_avatar_url = null;
+        let avatar_url = null;
+        let characterName = null;
+        if (dbPool) {
+          try {
+            const [avatarRows] = await dbPool.execute(
+              `SELECT u.avatar_url,
+                      c.avatar_url             AS character_avatar_url,
+                      CONCAT(c.prenom, ' ', c.nom) AS character_name
+               FROM users u
+               LEFT JOIN characters c ON c.id = ? AND c.user_id = u.id
+               WHERE u.id = ?
+               LIMIT 1`,
+              [characterId || null, userId]
+            );
+            if (avatarRows.length > 0) {
+              avatar_url           = avatarRows[0].avatar_url           || null;
+              character_avatar_url = avatarRows[0].character_avatar_url || null;
+              characterName        = avatarRows[0].character_name       || null;
+            }
+          } catch (e) { /* non bloquant */ }
+        }
+
         session.participants.push({
           userId,
           userName,
           socketId: socket.id,
           isGM: isUserGM,
           characterId: characterId || null,
+          avatar_url,
+          character_avatar_url,
+          characterName,
           joinedAt: Date.now()
         });
         
@@ -293,6 +322,7 @@ io.on('connection', (socket) => {
         characterId:          joinedParticipant?.characterId          || null,
         character_avatar_url: joinedParticipant?.character_avatar_url || null,
         avatar_url:           joinedParticipant?.avatar_url           || null,
+        characterName:        joinedParticipant?.characterName        || null,
         timestamp:            Date.now()
       });
       
@@ -488,6 +518,7 @@ function sanitizeSession(session, userId) {
       userName:             p.userName,
       isGM:                 p.isGM,
       characterId:          p.characterId          || null,
+      characterName:        p.characterName        || null,
       character_avatar_url: p.character_avatar_url || null,
       avatar_url:           p.avatar_url           || null,
       joinedAt:             p.joinedAt
@@ -522,18 +553,17 @@ async function updateSessionParticipants(roomCode, participants) {
   if (!dbPool) return;
   
   try {
-    // Supprimer les anciens participants
-    await dbPool.execute(
-      'DELETE FROM game_participants WHERE session_id = (SELECT id FROM game_sessions WHERE room_code = ?)',
-      [roomCode]
-    );
-    
-    // Insérer les nouveaux
     for (const p of participants) {
+      // UPSERT : met à jour si le participant existe déjà, insère sinon
+      // Préserve joined_at et left_at existants
       await dbPool.execute(
-        `INSERT INTO game_participants (session_id, user_id, role, joined_at)
-         VALUES ((SELECT id FROM game_sessions WHERE room_code = ?), ?, ?, NOW())`,
-        [roomCode, p.userId, p.isGM ? 'gm' : 'player']
+        `INSERT INTO game_participants (session_id, user_id, role, character_id, joined_at)
+         VALUES ((SELECT id FROM game_sessions WHERE room_code = ?), ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           role         = VALUES(role),
+           character_id = VALUES(character_id),
+           left_at      = NULL`,
+        [roomCode, p.userId, p.isGM ? 'gm' : 'player', p.characterId || null]
       );
     }
     
