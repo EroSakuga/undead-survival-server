@@ -694,63 +694,97 @@ setInterval(() => {
 
 // ========================================
 // NETTOYAGE AUTOMATIQUE DES SESSIONS
-// Appelle la procédure MySQL cleanup_old_sessions()
-// + sync mémoire ↔ BDD (supprime les sessions ended/expirées de activeSessions)
+// Logique entièrement dans Node.js
+// - Sessions "ended" → purgées de la mémoire + participants left_at mis à jour
+// - Sessions inactives depuis > 2h → marquées "ended" en BDD + purgées
+// - Sessions "paused" depuis > 24h → marquées "ended"
 // ========================================
-const CLEANUP_INTERVAL = 15 * 60 * 1000; // toutes les 15 minutes
-const SESSION_INACTIVE_MS = 2 * 60 * 60 * 1000; // 2h sans activité = expiré
+const CLEANUP_INTERVAL    = 15 * 60 * 1000;      // toutes les 15 minutes
+const INACTIVE_TIMEOUT_MS = 2  * 60 * 60 * 1000; // 2h sans activité
+const PAUSED_TIMEOUT_MS   = 24 * 60 * 60 * 1000; // 24h en pause
 
 setInterval(async () => {
   if (!dbPool) return;
 
-  try {
-    // 1. Appeler la procédure stockée MySQL
-    await dbPool.execute('CALL cleanup_old_sessions()');
-    console.log('🧹 cleanup_old_sessions() exécutée');
+  const now = Date.now();
+  let purged = 0;
 
-    // 2. Synchroniser activeSessions avec la BDD
-    //    Retirer de la mémoire les sessions ended ou inactives depuis > 2h
-    const now = Date.now();
-    let removed = 0;
+  // ── 1. Purger les sessions en mémoire (ended / inactives / pause longue) ──
+  for (const [roomCode, session] of activeSessions.entries()) {
+    const inactiveSince = now - (session.lastActivity || 0);
+    const isEnded       = session.status === 'ended';
+    const isInactive    = inactiveSince > INACTIVE_TIMEOUT_MS;
+    const isPausedLong  = session.status === 'paused' && inactiveSince > PAUSED_TIMEOUT_MS;
 
-    for (const [roomCode, session] of activeSessions.entries()) {
-      const isInactive = (now - (session.lastActivity || 0)) > SESSION_INACTIVE_MS;
-      const isEnded    = session.status === 'ended';
+    if (isEnded || isInactive || isPausedLong) {
+      try {
+        const reason = isEnded
+          ? 'La session a été terminée.'
+          : 'Session expirée par inactivité.';
 
-      if (isEnded || isInactive) {
-        // Vérifier en BDD que la session est bien marquée ended/inactive
-        try {
-          const [rows] = await dbPool.execute(
-            "SELECT status FROM game_sessions WHERE room_code = ? LIMIT 1",
+        // Notifier les clients encore connectés
+        const socketsInRoom = await io.in(roomCode).fetchSockets();
+        if (socketsInRoom.length > 0) {
+          io.to(roomCode).emit('session-ended', { reason });
+        }
+
+        // Marquer la session ended en BDD si elle ne l'est pas déjà
+        if (!isEnded) {
+          await dbPool.execute(
+            `UPDATE game_sessions
+             SET status = 'ended', last_activity = NOW()
+             WHERE room_code = ? AND status != 'ended'`,
             [roomCode]
           );
-          const dbStatus = rows[0]?.status;
-
-          if (!rows.length || dbStatus === 'ended' || isInactive) {
-            // Avertir les participants encore connectés avant de purger
-            const socketsInRoom = await io.in(roomCode).fetchSockets();
-            if (socketsInRoom.length > 0) {
-              io.to(roomCode).emit('session-ended', {
-                reason: isEnded ? 'La session a été terminée par le MJ.' : 'Session expirée pour inactivité.',
-              });
-            }
-            activeSessions.delete(roomCode);
-            removed++;
-            console.log(`🗑️  Session ${roomCode} retirée de la mémoire (${isEnded ? 'ended' : 'inactive'})`);
-          }
-        } catch (e) {
-          console.error(`Erreur vérif session ${roomCode}:`, e);
         }
+
+        // Marquer tous les participants actifs comme partis
+        await dbPool.execute(
+          `UPDATE game_participants gp
+           JOIN game_sessions gs ON gp.session_id = gs.id
+           SET gp.left_at = NOW()
+           WHERE gs.room_code = ? AND gp.left_at IS NULL`,
+          [roomCode]
+        );
+
+        activeSessions.delete(roomCode);
+        purged++;
+        console.log(`🗑️  Session ${roomCode} purgée (${isEnded ? 'ended' : isInactive ? 'inactive' : 'pause longue'})`);
+
+      } catch (e) {
+        console.error(`Erreur purge session ${roomCode}:`, e);
       }
     }
-
-    if (removed > 0) {
-      console.log(`🧹 ${removed} session(s) purgée(s) de la mémoire`);
-    }
-
-  } catch (error) {
-    console.error('Erreur cleanup automatique:', error);
   }
+
+  // ── 2. Nettoyer aussi la BDD pour les vieilles sessions hors mémoire ──────
+  // (sessions créées mais jamais rejointes, ou serveur redémarré)
+  try {
+    // Sessions actives/paused sans activité depuis > 2h
+    await dbPool.execute(
+      `UPDATE game_sessions
+       SET status = 'ended'
+       WHERE status IN ('active', 'paused')
+         AND last_activity < DATE_SUB(NOW(), INTERVAL 2 HOUR)`
+    );
+
+    // Fermer les participants orphelins de sessions ended
+    await dbPool.execute(
+      `UPDATE game_participants gp
+       JOIN game_sessions gs ON gp.session_id = gs.id
+       SET gp.left_at = NOW()
+       WHERE gs.status = 'ended'
+         AND gp.left_at IS NULL`
+    );
+
+  } catch (e) {
+    console.error('Erreur nettoyage BDD:', e);
+  }
+
+  if (purged > 0) {
+    console.log(`🧹 Cleanup: ${purged} session(s) purgée(s)`);
+  }
+
 }, CLEANUP_INTERVAL);
 
 // ========================================
