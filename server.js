@@ -398,6 +398,36 @@ io.on('connection', (socket) => {
     console.log(`🎲 ${userName} lance ${formula} = ${result}${secretLabel}`);
   });
   
+  // ===== MODIFIER PV/PS EN DIRECT =====
+  socket.on('update-stats', ({ roomCode, characterId, pv, ps }) => {
+    const session = activeSessions.get(roomCode);
+    if (!session) return;
+    // Vérif : GM ou propriétaire du perso
+    const requester = session.participants.find(p => p.socketId === socket.id);
+    if (!requester) return;
+    const isGM = requester.isGM;
+    const isOwner = String(requester.characterId) === String(characterId);
+    if (!isGM && !isOwner) return;
+
+    session.lastActivity = Date.now();
+    // Broadcast à toute la room
+    io.to(roomCode).emit('stats-updated', { characterId, pv, ps });
+    console.log(`❤️  Stats maj: perso ${characterId} PV=${pv} PS=${ps}`);
+  });
+
+  // ===== ATTRIBUER XP (GM uniquement) =====
+  socket.on('grant-xp', ({ roomCode, characterId, xpAmount, userId }) => {
+    const session = activeSessions.get(roomCode);
+    if (!session) return;
+    const requester = session.participants.find(p => p.socketId === socket.id);
+    if (!requester?.isGM) return;
+
+    session.lastActivity = Date.now();
+    // Notifier le joueur concerné
+    io.to(roomCode).emit('xp-granted', { characterId, xpAmount, userId });
+    console.log(`⭐ XP attribués: perso ${characterId} +${xpAmount} XP`);
+  });
+
   // ===== ENVOYER UN MESSAGE CHAT =====
   socket.on('send-message', ({ roomCode, userId, userName, message }) => {
     const session = activeSessions.get(roomCode);
