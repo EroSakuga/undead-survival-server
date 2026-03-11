@@ -172,9 +172,10 @@ io.on('connection', (socket) => {
         
         // Récupérer la session depuis la BDD
         const [rows] = await dbPool.execute(
-          `SELECT id, room_code, session_name, creator_id, gm_user_id, state_data, created_at 
-           FROM game_sessions 
-           WHERE room_code = ? AND status = 'active'`,
+          `SELECT id, room_code, session_name, creator_id, gm_user_id, state_data, created_at, status
+           FROM game_sessions
+           WHERE room_code = ? AND status IN ('active', 'paused', 'ended')
+             AND last_activity >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
           [roomCode]
         );
         
@@ -183,6 +184,22 @@ io.on('connection', (socket) => {
         }
         
         const dbSession = rows[0];
+        
+        // Si la session est ended, seul le GM peut la réactiver
+        if (dbSession.status === 'ended') {
+          const isOwner = String(dbSession.gm_user_id) === String(userId)
+                       || String(dbSession.creator_id) === String(userId);
+          if (!isOwner) {
+            return socket.emit('error', { message: 'Cette session est terminée.' });
+          }
+          // Réactiver la session
+          await dbPool.execute(
+            `UPDATE game_sessions SET status = 'active', last_activity = NOW() WHERE room_code = ?`,
+            [roomCode]
+          );
+          dbSession.status = 'active';
+          console.log(`♻️  Session ${roomCode} réactivée par le GM (${userId})`);
+        }
         
         // Récupérer les participants
         const [participants] = await dbPool.execute(
@@ -831,6 +848,30 @@ setInterval(async () => {
 
   } catch (e) {
     console.error('Erreur nettoyage BDD:', e);
+  }
+
+  // ── 3. Suppression définitive des sessions ended depuis > 30 jours ─────────
+  try {
+    // D'abord supprimer les participants (FK)
+    const [delPart] = await dbPool.execute(
+      `DELETE gp FROM game_participants gp
+       JOIN game_sessions gs ON gp.session_id = gs.id
+       WHERE gs.status = 'ended'
+         AND gs.last_activity < DATE_SUB(NOW(), INTERVAL 30 DAY)`
+    );
+
+    // Puis supprimer les sessions elles-mêmes (libère le room_code)
+    const [delSess] = await dbPool.execute(
+      `DELETE FROM game_sessions
+       WHERE status = 'ended'
+         AND last_activity < DATE_SUB(NOW(), INTERVAL 30 DAY)`
+    );
+
+    if (delSess.affectedRows > 0) {
+      console.log(`🗑️  Purge 30j : ${delSess.affectedRows} session(s) supprimée(s) définitivement, ${delPart.affectedRows} participant(s) effacés.`);
+    }
+  } catch (e) {
+    console.error('Erreur purge 30j:', e);
   }
 
   if (purged > 0) {
