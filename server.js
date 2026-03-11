@@ -233,6 +233,7 @@ io.on('connection', (socket) => {
         session = {
           roomCode: dbSession.room_code,
           sessionName: dbSession.session_name,
+          status: dbSession.status || 'active',
           creatorId: dbSession.creator_id,
           gmUserId: dbSession.gm_user_id,
           participants: participants.map(p => ({
@@ -690,6 +691,7 @@ function sanitizeSession(session, userId) {
       joinedAt:             p.joinedAt
     })),
     state:     session.state,
+    status:    session.status || 'active',
     isGM:      session.participants.find(p => p.userId === userId)?.isGM || false,
     createdAt: session.createdAt
   };
