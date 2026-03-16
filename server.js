@@ -656,6 +656,129 @@ io.on('connection', (socket) => {
 });
 
 // ========================================
+// ENDPOINTS REST — Historique des sessions
+// ========================================
+
+// GET /api/my-sessions
+app.get('/api/my-sessions', async (req, res) => {
+  const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim();
+  if (!token || !dbPool) return res.status(401).json({ error: 'Non autorisé' });
+  try {
+    const [uRows] = await dbPool.execute(
+      'SELECT id FROM users WHERE session_token = ? LIMIT 1', [token]
+    );
+    if (!uRows.length) return res.status(401).json({ error: 'Token invalide' });
+    const userId = uRows[0].id;
+
+    const [sessions] = await dbPool.execute(
+      `SELECT DISTINCT
+         gs.id, gs.room_code, gs.session_name, gs.status,
+         gs.created_at, gs.last_activity,
+         gs.gm_user_id, gs.creator_id,
+         u.display_name                                   AS gm_name,
+         gp.role                                          AS my_role,
+         gp.character_id                                  AS my_character_id,
+         CONCAT(c.prenom, ' ', c.nom)                     AS my_character_name,
+         c.avatar_url                                     AS my_character_avatar,
+         (SELECT COUNT(DISTINCT gp2.user_id)
+          FROM game_participants gp2
+          WHERE gp2.session_id = gs.id)                   AS player_count
+       FROM game_sessions gs
+       LEFT JOIN users u              ON u.id  = gs.gm_user_id
+       LEFT JOIN game_participants gp ON gp.session_id = gs.id AND gp.user_id = ?
+       LEFT JOIN characters c         ON c.id  = gp.character_id
+       WHERE gs.gm_user_id = ? OR gp.user_id = ?
+       ORDER BY gs.last_activity DESC
+       LIMIT 50`,
+      [userId, userId, userId]
+    );
+    res.json({ sessions });
+  } catch (e) {
+    console.error('Erreur my-sessions:', e);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// POST /api/reactivate-session
+app.post('/api/reactivate-session', async (req, res) => {
+  const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim();
+  const { session_id } = req.body || {};
+  if (!token || !session_id || !dbPool) return res.status(400).json({ error: 'Paramètres manquants' });
+  try {
+    const [uRows] = await dbPool.execute(
+      'SELECT id FROM users WHERE session_token = ? LIMIT 1', [token]
+    );
+    if (!uRows.length) return res.status(401).json({ error: 'Token invalide' });
+    const userId = uRows[0].id;
+
+    const [sRows] = await dbPool.execute(
+      'SELECT id, room_code, gm_user_id, creator_id, status FROM game_sessions WHERE id = ? LIMIT 1',
+      [session_id]
+    );
+    if (!sRows.length) return res.status(404).json({ error: 'Session introuvable' });
+    const sess = sRows[0];
+
+    const isOwner = String(sess.gm_user_id) === String(userId)
+                 || String(sess.creator_id)  === String(userId);
+    if (!isOwner) return res.status(403).json({ error: 'Seul le MJ peut réactiver' });
+
+    // Déjà un code et pas archivée → on renvoie directement
+    if (sess.room_code && sess.status !== 'archived') {
+      return res.json({ room_code: sess.room_code, reused: true });
+    }
+
+    const newCode = await generateUniqueRoomCode();
+    await dbPool.execute(
+      `UPDATE game_sessions SET room_code = ?, status = 'active', last_activity = NOW() WHERE id = ?`,
+      [newCode, session_id]
+    );
+    console.log(`♻️  Session #${session_id} réactivée → ${newCode} par user ${userId}`);
+    res.json({ room_code: newCode, reused: false });
+  } catch (e) {
+    console.error('Erreur reactivate-session:', e);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// DELETE /api/delete-session/:id
+app.delete('/api/delete-session/:id', async (req, res) => {
+  const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim();
+  const sessionId = req.params.id;
+  if (!token || !sessionId || !dbPool) return res.status(400).json({ error: 'Paramètres manquants' });
+  try {
+    const [uRows] = await dbPool.execute(
+      'SELECT id FROM users WHERE session_token = ? LIMIT 1', [token]
+    );
+    if (!uRows.length) return res.status(401).json({ error: 'Token invalide' });
+    const userId = uRows[0].id;
+
+    const [sRows] = await dbPool.execute(
+      'SELECT id, room_code, gm_user_id, creator_id FROM game_sessions WHERE id = ? LIMIT 1',
+      [sessionId]
+    );
+    if (!sRows.length) return res.status(404).json({ error: 'Session introuvable' });
+    const sess = sRows[0];
+
+    const isOwner = String(sess.gm_user_id) === String(userId)
+                 || String(sess.creator_id)  === String(userId);
+    if (!isOwner) return res.status(403).json({ error: 'Seul le MJ peut supprimer' });
+
+    await dbPool.execute('DELETE FROM game_participants WHERE session_id = ?', [sessionId]);
+    await dbPool.execute('DELETE FROM game_sessions WHERE id = ?', [sessionId]);
+
+    if (sess.room_code && activeSessions.has(sess.room_code)) {
+      io.to(sess.room_code).emit('session-ended', { reason: 'Session supprimée par le MJ.' });
+      activeSessions.delete(sess.room_code);
+    }
+    console.log(`🗑️  Session #${sessionId} supprimée par user ${userId}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Erreur delete-session:', e);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ========================================
 // FONCTIONS UTILITAIRES
 // ========================================
 
@@ -663,16 +786,23 @@ io.on('connection', (socket) => {
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
-  for (let i = 0; i < 6; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
-  
-  // Vérifier l'unicité
-  if (activeSessions.has(code)) {
-    return generateRoomCode();
-  }
-  
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  if (activeSessions.has(code)) return generateRoomCode();
   return code;
+}
+
+async function generateUniqueRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  for (let attempts = 0; attempts < 20; attempts++) {
+    let code = '';
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    if (activeSessions.has(code)) continue;
+    const [rows] = await dbPool.execute(
+      'SELECT id FROM game_sessions WHERE room_code = ? LIMIT 1', [code]
+    );
+    if (rows.length === 0) return code;
+  }
+  throw new Error('Impossible de générer un room_code unique');
 }
 
 // Nettoyer les données sensibles avant envoi
@@ -852,28 +982,20 @@ setInterval(async () => {
     console.error('Erreur nettoyage BDD:', e);
   }
 
-  // ── 3. Suppression définitive des sessions ended depuis > 30 jours ─────────
+  // ── 3. Libération du room_code après 30j (données conservées → archived) ────
   try {
-    // D'abord supprimer les participants (FK)
-    const [delPart] = await dbPool.execute(
-      `DELETE gp FROM game_participants gp
-       JOIN game_sessions gs ON gp.session_id = gs.id
-       WHERE gs.status = 'ended'
-         AND gs.last_activity < DATE_SUB(NOW(), INTERVAL 30 DAY)`
-    );
-
-    // Puis supprimer les sessions elles-mêmes (libère le room_code)
-    const [delSess] = await dbPool.execute(
-      `DELETE FROM game_sessions
+    const [archived] = await dbPool.execute(
+      `UPDATE game_sessions
+       SET room_code = NULL, status = 'archived'
        WHERE status = 'ended'
+         AND room_code IS NOT NULL
          AND last_activity < DATE_SUB(NOW(), INTERVAL 30 DAY)`
     );
-
-    if (delSess.affectedRows > 0) {
-      console.log(`🗑️  Purge 30j : ${delSess.affectedRows} session(s) supprimée(s) définitivement, ${delPart.affectedRows} participant(s) effacés.`);
+    if (archived.affectedRows > 0) {
+      console.log(`📦 Archivage 30j : ${archived.affectedRows} code(s) libéré(s), données conservées.`);
     }
   } catch (e) {
-    console.error('Erreur purge 30j:', e);
+    console.error('Erreur archivage 30j:', e);
   }
 
   if (purged > 0) {
