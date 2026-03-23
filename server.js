@@ -492,7 +492,8 @@ io.on('connection', (socket) => {
   });
   
   // ===== CHANGER LA MUSIQUE (MJ ONLY) =====
-  socket.on('change-music', ({ roomCode, userId, musicUrl }) => {
+  // action : 'play' | 'pause' | 'stop'
+  socket.on('change-music', ({ roomCode, userId, musicUrl, action = 'play' }) => {
     const session = activeSessions.get(roomCode);
     if (!session) return;
     
@@ -501,12 +502,26 @@ io.on('connection', (socket) => {
       return socket.emit('error', { message: 'Only GM can change music' });
     }
     
-    session.state.music = musicUrl;
+    if (action === 'stop') {
+      session.state.music       = null;
+      session.state.musicAction = 'stop';
+    } else if (action === 'pause') {
+      // On garde l'URL en mémoire pour pouvoir reprendre
+      session.state.musicAction = 'pause';
+    } else {
+      // play (nouvelle piste ou reprise)
+      if (musicUrl) session.state.music = musicUrl;
+      session.state.musicAction = 'play';
+    }
     session.lastActivity = Date.now();
-    
-    io.to(roomCode).emit('music-changed', { musicUrl, timestamp: Date.now() });
-    
-    console.log(`🎵 Musique changée dans ${roomCode}`);
+
+    io.to(roomCode).emit('music-changed', {
+      musicUrl:    session.state.music,
+      action,
+      timestamp:   Date.now(),
+    });
+
+    console.log(`🎵 Musique ${action} dans ${roomCode}: ${session.state.music || 'none'}`);
   });
   
   // ===== DÉCONNEXION =====
