@@ -524,6 +524,22 @@ io.on('connection', (socket) => {
     console.log(`🎵 Musique ${action} dans ${roomCode}: ${session.state.music || 'none'}`);
   });
   
+  // ===== SEEK MUSIQUE (MJ ONLY) =====
+  socket.on('seek-music', ({ roomCode, userId, position }) => {
+    const session = activeSessions.get(roomCode);
+    if (!session) return;
+
+    const participant = session.participants.find(p => p.userId === userId);
+    if (!participant || !participant.isGM) return;
+
+    const pos = parseFloat(position) || 0;
+    session.state.musicPosition = pos;
+    session.lastActivity = Date.now();
+
+    // Broadcast à tous SAUF l'émetteur (le MJ s'est déjà seeké lui-même)
+    socket.to(roomCode).emit('music-seeked', { position: pos });
+  });
+
   // ===== DÉCONNEXION =====
   socket.on('disconnect', () => {
     console.log(`❌ Client déconnecté: ${socket.id}`);
